@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: clinihub
+      POSTGRES_PASSWORD: naruto123
+      POSTGRES_DB: clinihub
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinihub -d clinihub"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://clinihub:naruto123@db:5432/clinihub
+    ports:
+      - "5000:5000"
+
+volumes:
+  pgdata:
