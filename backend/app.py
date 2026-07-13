@@ -1,7 +1,7 @@
 import os
 import uuid
 import bcrypt
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -27,7 +27,6 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=8)
 CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
 jwt = JWTManager(app)
 
-# Inicializa o banco ao subir o servidor
 with app.app_context():
     init_db()
 
@@ -48,10 +47,6 @@ def new_id():
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
-    """
-    Body: { "role": "admin" | "doctor", "password": "...", "doctorId": "..." }
-    Retorna JWT com { role, doctorId? } nos claims.
-    """
     data = request.get_json()
     role = data.get("role")
     password = data.get("password", "")
@@ -72,11 +67,12 @@ def login():
         if not doctor_id:
             return jsonify({"error": "doctorId obrigatório"}), 400
 
-        db = get_db()
-        doctor = db.execute(
-            "SELECT * FROM doctors WHERE id = ?", (doctor_id,)
-        ).fetchone()
-        db.close()
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM doctors WHERE id = %s", (doctor_id,))
+        doctor = cur.fetchone()
+        cur.close()
+        conn.close()
 
         if not doctor:
             return jsonify({"error": "Médico não encontrado"}), 404
@@ -101,18 +97,18 @@ def login():
 @app.route("/api/auth/me", methods=["GET"])
 @jwt_required()
 def me():
-    """Retorna os dados do usuário logado a partir do token."""
     claims = get_jwt()
     identity = get_jwt_identity()
 
     if claims.get("role") == "admin":
         return jsonify({"role": "admin", "name": "Administrador"})
 
-    db = get_db()
-    doctor = db.execute(
-        "SELECT id, name, specialty FROM doctors WHERE id = ?", (identity,)
-    ).fetchone()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, specialty FROM doctors WHERE id = %s", (identity,))
+    doctor = cur.fetchone()
+    cur.close()
+    conn.close()
 
     if not doctor:
         return jsonify({"error": "Médico não encontrado"}), 404
@@ -130,9 +126,12 @@ def me():
 @app.route("/api/patients", methods=["GET"])
 @jwt_required()
 def get_patients():
-    db = get_db()
-    patients = rows_to_list(db.execute("SELECT * FROM patients ORDER BY name").fetchall())
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM patients ORDER BY name")
+    patients = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
     return jsonify(patients)
 
 
@@ -140,50 +139,56 @@ def get_patients():
 @jwt_required()
 def create_patient():
     data = request.get_json()
-    db = get_db()
-    from datetime import datetime
+    conn = get_db()
+    cur = conn.cursor()
     pid = new_id()
-    db.execute(
-        "INSERT INTO patients (id, name, cpf, phone, birth_date, created_at) VALUES (?,?,?,?,?,?)",
+    cur.execute(
+        "INSERT INTO patients (id, name, cpf, phone, birth_date, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
         (pid, data["name"], data.get("cpf", ""), data.get("phone", ""),
          data.get("birthDate", ""), datetime.utcnow().isoformat()),
     )
-    db.commit()
-    patient = row_to_dict(db.execute("SELECT * FROM patients WHERE id=?", (pid,)).fetchone())
-    db.close()
+    conn.commit()
+    cur.execute("SELECT * FROM patients WHERE id=%s", (pid,))
+    patient = row_to_dict(cur.fetchone())
+    cur.close()
+    conn.close()
     return jsonify(patient), 201
 
 
 @app.route("/api/patients/<pid>", methods=["DELETE"])
 @jwt_required()
 def delete_patient(pid):
-    db = get_db()
-    db.execute("DELETE FROM patients WHERE id=?", (pid,))
-    db.commit()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM patients WHERE id=%s", (pid,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"deleted": pid})
 
 
 # ─── DOCTORS ─────────────────────────────────────────────────────────────────
-# Rota pública — só retorna id, name e specialty (sem dados sensíveis)
+
 @app.route("/api/doctors/public", methods=["GET"])
 def get_doctors_public():
-    db = get_db()
-    doctors = rows_to_list(
-        db.execute("SELECT id, name, specialty FROM doctors ORDER BY name").fetchall()
-    )
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, specialty FROM doctors ORDER BY name")
+    doctors = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
     return jsonify(doctors)
+
 
 @app.route("/api/doctors", methods=["GET"])
 @jwt_required()
 def get_doctors():
-    db = get_db()
-    # Não retorna password_hash para o frontend
-    doctors = rows_to_list(
-        db.execute("SELECT id, name, crm, specialty, email FROM doctors ORDER BY name").fetchall()
-    )
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, crm, specialty, email FROM doctors ORDER BY name")
+    doctors = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
     return jsonify(doctors)
 
 
@@ -202,23 +207,25 @@ def create_doctor():
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     did = f"dr-{new_id()}"
 
-    db = get_db()
-    # Verifica CRM duplicado
-    existing = db.execute("SELECT id FROM doctors WHERE crm=?", (data["crm"],)).fetchone()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM doctors WHERE crm=%s", (data["crm"],))
+    existing = cur.fetchone()
     if existing:
-        db.close()
+        cur.close()
+        conn.close()
         return jsonify({"error": "CRM já cadastrado"}), 409
 
-    db.execute(
-        "INSERT INTO doctors (id, name, crm, specialty, email, password_hash) VALUES (?,?,?,?,?,?)",
+    cur.execute(
+        "INSERT INTO doctors (id, name, crm, specialty, email, password_hash) VALUES (%s,%s,%s,%s,%s,%s)",
         (did, data["name"], data["crm"], data.get("specialty", "Clínica Médica"),
          data.get("email", ""), hashed),
     )
-    db.commit()
-    doctor = row_to_dict(
-        db.execute("SELECT id, name, crm, specialty, email FROM doctors WHERE id=?", (did,)).fetchone()
-    )
-    db.close()
+    conn.commit()
+    cur.execute("SELECT id, name, crm, specialty, email FROM doctors WHERE id=%s", (did,))
+    doctor = row_to_dict(cur.fetchone())
+    cur.close()
+    conn.close()
     return jsonify(doctor), 201
 
 
@@ -229,10 +236,12 @@ def delete_doctor(did):
     if claims.get("role") != "admin":
         return jsonify({"error": "Apenas admin pode excluir médicos"}), 403
 
-    db = get_db()
-    db.execute("DELETE FROM doctors WHERE id=?", (did,))
-    db.commit()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM doctors WHERE id=%s", (did,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"deleted": did})
 
 
@@ -241,12 +250,14 @@ def delete_doctor(did):
 @app.route("/api/rooms", methods=["GET"])
 @jwt_required()
 def get_rooms():
-    db = get_db()
-    rooms = rows_to_list(db.execute("SELECT * FROM rooms ORDER BY name").fetchall())
-    db.close()
-    # SQLite retorna 0/1 para booleanos — converter
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM rooms ORDER BY name")
+    rooms = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
     for r in rooms:
-        r["inMaintenance"] = bool(r.pop("in_maintenance", 0))
+        r["inMaintenance"] = bool(r.pop("in_maintenance", False))
     return jsonify(rooms)
 
 
@@ -255,15 +266,18 @@ def get_rooms():
 def create_room():
     data = request.get_json()
     rid = f"sala-{new_id()}"
-    db = get_db()
-    db.execute(
-        "INSERT INTO rooms (id, name, description, in_maintenance) VALUES (?,?,?,?)",
-        (rid, data["name"], data.get("description", "Geral"), 0),
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO rooms (id, name, description, in_maintenance) VALUES (%s,%s,%s,%s)",
+        (rid, data["name"], data.get("description", "Geral"), False),
     )
-    db.commit()
-    room = row_to_dict(db.execute("SELECT * FROM rooms WHERE id=?", (rid,)).fetchone())
-    db.close()
-    room["inMaintenance"] = bool(room.pop("in_maintenance", 0))
+    conn.commit()
+    cur.execute("SELECT * FROM rooms WHERE id=%s", (rid,))
+    room = row_to_dict(cur.fetchone())
+    cur.close()
+    conn.close()
+    room["inMaintenance"] = bool(room.pop("in_maintenance", False))
     return jsonify(room), 201
 
 
@@ -271,26 +285,31 @@ def create_room():
 @jwt_required()
 def update_room(rid):
     data = request.get_json()
-    db = get_db()
+    conn = get_db()
+    cur = conn.cursor()
     if "inMaintenance" in data:
-        db.execute(
-            "UPDATE rooms SET in_maintenance=? WHERE id=?",
-            (1 if data["inMaintenance"] else 0, rid),
+        cur.execute(
+            "UPDATE rooms SET in_maintenance=%s WHERE id=%s",
+            (bool(data["inMaintenance"]), rid),
         )
-    db.commit()
-    room = row_to_dict(db.execute("SELECT * FROM rooms WHERE id=?", (rid,)).fetchone())
-    db.close()
-    room["inMaintenance"] = bool(room.pop("in_maintenance", 0))
+        conn.commit()
+    cur.execute("SELECT * FROM rooms WHERE id=%s", (rid,))
+    room = row_to_dict(cur.fetchone())
+    cur.close()
+    conn.close()
+    room["inMaintenance"] = bool(room.pop("in_maintenance", False))
     return jsonify(room)
 
 
 @app.route("/api/rooms/<rid>", methods=["DELETE"])
 @jwt_required()
 def delete_room(rid):
-    db = get_db()
-    db.execute("DELETE FROM rooms WHERE id=?", (rid,))
-    db.commit()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rooms WHERE id=%s", (rid,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"deleted": rid})
 
 
@@ -299,12 +318,12 @@ def delete_room(rid):
 @app.route("/api/appointments", methods=["GET"])
 @jwt_required()
 def get_appointments():
-    db = get_db()
-    apps = rows_to_list(
-        db.execute("SELECT * FROM appointments ORDER BY date_time").fetchall()
-    )
-    db.close()
-    # Converter snake_case → camelCase para o frontend
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM appointments ORDER BY date_time")
+    apps = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
     result = []
     for a in apps:
         result.append({
@@ -326,34 +345,37 @@ def get_appointments():
 @jwt_required()
 def create_appointment():
     data = request.get_json()
-    db = get_db()
+    conn = get_db()
+    cur = conn.cursor()
 
-    # Checar conflito de horário
     new_start = data["dateTime"]
     duration = data.get("durationMinutes", 20)
 
-    conflict = db.execute("""
+    # Postgres: date_time é TEXT, então convertemos pra timestamp na query
+    cur.execute("""
         SELECT id FROM appointments
         WHERE status != 'cancelled'
-          AND (doctor_id = ? OR room_id = ?)
-          AND date_time < datetime(?, '+' || ? || ' minutes')
-          AND datetime(date_time, '+' || duration_minutes || ' minutes') > ?
+          AND (doctor_id = %s OR room_id = %s)
+          AND date_time::timestamp < (%s::timestamp + (%s || ' minutes')::interval)
+          AND (date_time::timestamp + (duration_minutes || ' minutes')::interval) > %s::timestamp
     """, (
         data["doctorId"], data["roomId"],
         new_start, str(duration),
         new_start,
-    )).fetchone()
+    ))
+    conflict = cur.fetchone()
 
     if conflict:
-        db.close()
+        cur.close()
+        conn.close()
         return jsonify({"error": "Choque de horário"}), 409
 
     aid = new_id()
-    db.execute("""
+    cur.execute("""
         INSERT INTO appointments
           (id, patient_id, patient_name, doctor_id, doctor_name,
            room_id, room_name, date_time, duration_minutes, status)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         aid,
         data["patientId"], data["patientName"],
@@ -362,18 +384,21 @@ def create_appointment():
         data["dateTime"], duration,
         data.get("status", "scheduled"),
     ))
-    db.commit()
-    db.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"id": aid, **data}), 201
 
 
 @app.route("/api/appointments/<aid>", methods=["DELETE"])
 @jwt_required()
 def delete_appointment(aid):
-    db = get_db()
-    db.execute("DELETE FROM appointments WHERE id=?", (aid,))
-    db.commit()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM appointments WHERE id=%s", (aid,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"deleted": aid})
 
 
@@ -383,19 +408,20 @@ def delete_appointment(aid):
 @jwt_required()
 def get_ehr():
     claims = get_jwt()
-    db = get_db()
+    conn = get_db()
+    cur = conn.cursor()
 
     if claims.get("role") == "admin":
-        records = rows_to_list(db.execute("SELECT * FROM ehr_records ORDER BY date DESC").fetchall())
+        cur.execute("SELECT * FROM ehr_records ORDER BY date DESC")
     else:
         doctor_id = get_jwt_identity()
-        records = rows_to_list(
-            db.execute(
-                "SELECT * FROM ehr_records WHERE doctor_id=? ORDER BY date DESC",
-                (doctor_id,),
-            ).fetchall()
+        cur.execute(
+            "SELECT * FROM ehr_records WHERE doctor_id=%s ORDER BY date DESC",
+            (doctor_id,),
         )
-    db.close()
+    records = rows_to_list(cur.fetchall())
+    cur.close()
+    conn.close()
 
     result = []
     for r in records:
@@ -413,15 +439,16 @@ def get_ehr():
 @jwt_required()
 def create_ehr():
     data = request.get_json()
-    from datetime import datetime
     rid = new_id()
-    db = get_db()
-    db.execute(
-        "INSERT INTO ehr_records (id, patient_id, doctor_id, date, evolution) VALUES (?,?,?,?,?)",
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ehr_records (id, patient_id, doctor_id, date, evolution) VALUES (%s,%s,%s,%s,%s)",
         (rid, data["patientId"], data["doctorId"], datetime.utcnow().isoformat(), data["evolution"]),
     )
-    db.commit()
-    db.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"id": rid, **data}), 201
 
 
@@ -430,31 +457,34 @@ def create_ehr():
 @app.route("/api/schedules/<doctor_name>", methods=["GET"])
 @jwt_required()
 def get_schedule(doctor_name):
-    db = get_db()
-    rows = db.execute(
-        "SELECT slot FROM doctor_schedules WHERE doctor_name=?", (doctor_name,)
-    ).fetchall()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT slot FROM doctor_schedules WHERE doctor_name=%s", (doctor_name,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
     return jsonify([r["slot"] for r in rows])
 
 
 @app.route("/api/schedules/<doctor_name>", methods=["PUT"])
 @jwt_required()
 def update_schedule(doctor_name):
-    slots = request.get_json()  # lista de strings ex: ["0-08:00", "0-08:20"]
-    db = get_db()
-    db.execute("DELETE FROM doctor_schedules WHERE doctor_name=?", (doctor_name,))
+    slots = request.get_json()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM doctor_schedules WHERE doctor_name=%s", (doctor_name,))
     for slot in slots:
-        db.execute(
-            "INSERT OR IGNORE INTO doctor_schedules (doctor_name, slot) VALUES (?,?)",
+        cur.execute(
+            "INSERT INTO doctor_schedules (doctor_name, slot) VALUES (%s,%s) ON CONFLICT DO NOTHING",
             (doctor_name, slot),
         )
-    db.commit()
-    db.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({"saved": len(slots)})
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
