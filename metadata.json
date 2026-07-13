@@ -1,0 +1,6 @@
+{
+  "name": "CliniHub",
+  "description": "Sistema de gestão clínica integrado com agenda, prontuários eletrônicos e gestão de médicos e pacientes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
